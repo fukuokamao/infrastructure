@@ -1,0 +1,78 @@
+#!/bin/sh
+
+# ドメイン一覧
+DOMAIN_LIST=【任意のディレクトリ】/domainlist.csv
+UPDATE=【任意のディレクトリ】/update.csv
+NOTFOUND=【任意のディレクトリ】/notfound.csv
+
+# 何日前になれば通知するか
+deadline=10
+
+# Slack情報
+CHANNEL="【slackのチャンネル名】"
+WEBHOOKURL="【上記チャンネル名に紐付いたwebhookのURL】"
+TOKEN="【ご自身のトークン】"
+FILE_UPLOAD_API="https://slack.com/api/files.upload"
+
+# 現在時刻
+nowS=$(date "+%s")
+
+# 今日の日付
+today=$(date "+%Y%m%d")
+
+# SSL証明書の有効期限を取得
+function ssl_cert_limit() {
+    d=$1
+    limit_date_gmt=$(openssl s_client -connect $d:443 -servername $d < /dev/null 2> /dev/null | openssl x509 -text | grep 'Not After' | awk -F'Not After :' '{print $2}')
+    limit_date_jst=$(date +%s --date "$limit_date_gmt" | awk '{print strftime("%Y/%m/%d %H:%M:%S", $1)}')
+    echo $limit_date_jst
+}
+
+# 残り日数取得
+function remain_days() {
+    targetS=$(date -d "$1" '+%s')
+
+    r=$(($targetS - $nowS))
+    r=$((r / 86400 + 1))
+    echo $r
+}
+
+# Slackに通知
+function slack () {
+    MESSAGE="$1"
+    BOTNAME="SSL証明書有効期限のお知らせ"
+    UPDATE_COMMENT="上記ドメインのSSL証明書を更新してください"
+    NOTFOUND_COMMENT="上記ドメインを確認してください"
+
+    curl -s -S -X POST -d "payload={\"channel\": \"${CHANNEL}\", \"username\": \"${BOTNAME}\", \"text\": \"${MESSAGE}\" }" ${WEBHOOKURL} >/dev/null
+    curl -F file=@"${UPDATE}" -F channels="${CHANNEL}" -F filename="update_${today}.csv" -F initial_comment="${UPDATE_COMMENT}" -F token="${TOKEN}" ${FILE_UPLOAD_API}
+    curl -F file=@"${NOTFOUND}" -F channels="${CHANNEL}" -F filename="notfound_${today}.csv" -F initial_comment="${NOTFOUND_COMMENT}" -F token="${TOKEN}" ${FILE_UPLOAD_API}
+}
+
+# 通知内容
+for d in `cat ${DOMAIN_LIST}`
+do
+    limit_date=$(ssl_cert_limit $d)
+    remain_days=$(remain_days "$limit_date")
+    website_alive=`wget --spider --timeout 30 -t 1 ${d} 2>&1 | grep -c "200 OK"`
+if [ $website_alive == 1 ] ; then
+    if [ $remain_days -le $deadline ]; then
+        msg1=$msg1"${d} 残り${remain_days}日 $limit_dateまで
+"
+echo "$msg1" > "${UPDATE}"
+    fi
+else
+    msg2=$msg2"${d}
+"
+echo "$msg2" > "${NOTFOUND}"
+fi
+done
+
+update_sum=`< ${UPDATE} wc -l`
+notfound_sum=`< ${NOTFOUND} wc -l`
+
+#slack "<!channel>
+slack "
+有効期限が *$deadline* 日以内のドメイン：$(($update_sum -1)) 件
+アクセスができないWEBサイト：$(($notfound_sum -1)) 件
+"
